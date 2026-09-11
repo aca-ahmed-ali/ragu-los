@@ -1,0 +1,45 @@
+select
+    rec.account_number
+--      ,       cd.account_number
+     , prev.decision_date         AS book_date
+     , prev.decision_date         AS app_date
+     , dd.calendar_week AS book_week
+
+     , 'STG' as lob
+     , pred_t0_adj_impound
+     , pred_depr_rate_std
+
+
+
+     , case
+           when lob IN ('KMX', 'ENT', 'FLD') then 0.15 * (pred_t0_adj_impound * (1 - pred_depr_rate_std) ^ 2.3) + 0.85 * (pred_t0_adj_no_impound * (1 - pred_depr_rate_std) ^ 2.3)
+
+           else 0.15 * (pred_t0_adj_impound * (1 - pred_depr_rate_std) ^ 2) + 0.85 * (pred_t0_adj_no_impound * (1 - pred_depr_rate_std) ^ 2)
+    end                 as new_recovery_multiplier
+
+--      , pred_t0_adj_impound * (1 - pred_depr_rate_std) ^ 2 AS sumn_summ
+--     ,0.15*bb_value*(pred_t0_adj_impound * (1-pred_depr_rate_std)^2) + 0.85*bb_value*(pred_t0_adj_no_impound * (1-pred_depr_rate_std)^2) as pred_imp15_2yob
+--     0.15*(pred_t0_adj_impound * (1-pred_depr_rate_std)^2) + 0.85*(pred_t0_adj_no_impound * (1-pred_depr_rate_std)^2) as new_recovery_multiplier
+
+
+from sandbox.rds_rec_model_originations rec
+         LEFT JOIN edwnpi.date_dim AS dd
+                   ON rec.con_date = dd.calendar_date
+
+left join edwnpi.los_deal_current_fact cd
+on rec.account_number = cd.account_number
+
+
+
+
+
+        left join (select source_document_id,
+                                 min(application_received_date)::date as decision_date
+                          from odsnpi.sfs_deal_detail_scd
+                          where current_version_flag = 1
+--                             and aspect = 'application'
+                          group by source_document_id) prev
+                         on prev.source_document_id = cd.sfs_application_number
+
+where lob = 'SFS'
+AND     app_date >= '2025-10-07';

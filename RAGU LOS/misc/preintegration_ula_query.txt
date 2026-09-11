@@ -1,0 +1,183 @@
+
+
+
+SELECT cd.account_number
+     , cd.book_date
+     , dd.calendar_week                                                    AS book_week
+     , dd.calendar_quarter_name                                            AS book_vintage
+     , date(cd.application_received_dtm)                                   AS app_date
+     --, bbvt.bb_wholesale                                                           AS bbvalue
+     , bbvt.bb_value                                                       AS bbvalue
+     , cd.con_sales_price                                                  AS sale_price
+     -- , case when dru.riskdealergroup = 'FRN' and cdd.dealer_type_name = 'Independent' then 1 else 0 end AS frni_flag
+
+
+     , -1  frni_flag
+
+     , cd.con_apr                                                          AS apr
+     , cd.con_amount_financed_back                                         AS amt_financed
+     , cd.con_cash_down_amt                                                AS cash_down
+     , cd.con_net_trade_amt                                                AS tradein_value
+     , cd.purchase_odometer                                                AS mileage
+     , cd.con_risk_model_score                                                 AS cd_model_score
+
+
+     , con.payment / con.book_pti
+                                                                           AS total_income
+--      , cd.con_payment_front_amt / (CASE
+--                                        WHEN 12000 < total_income THEN 12000
+--                                        ELSE total_income END)              AS pti
+
+
+     ,cd.con_pti_back as pti
+
+     , cd.purchase_make                                                    AS make
+     , cd.purchase_year                                                    AS model_year
+     , cd.purchase_vin                                                     AS vin
+     , 'STG'                                                               AS lob
+     , date_part(dayofweek, cd.application_received_dtm)
+                                                                           AS day_of_week
+     , COALESCE(ccat.secured_credit_card, 0)     AS secured_credit_card
+
+      , COALESCE(ccat.chime_indicator, 0)                                   AS chime_indicator
+      , COALESCE(ccat.chime_indicator, cbcat.chime_indicator, 0)            AS nonkmx_chime_indicator
+
+--      , stu.federal_student_loan_flag::int                                  AS student_loan_flag
+
+     , case when cd.cb_customer_id is not null then 1.0000 else 0.0000 end as cb_flag
+
+
+     ,
+--     case
+--            when fraud.fraud_adjustment > 0 then fraud.fraud_adjustment
+--            else 1.00 end
+        1 as fraud_adjustment
+
+
+     , ett.employment_type                                                 AS employment
+     , cdd.pricing_specialty_dealer_name                                   AS specialty_dealer
+     , ett.months_at_employer * 12 + ett.years_at_employer     AS employed_months
+     , COALESCE(cast(ccat.vantage as int), 0)                                           AS fico_score -- using vantage in place of fico
+     , COALESCE(cast(ccat.vantage as int), 0)                              AS vantage_score --COALESCE(cd.pb_vantage_score, 0)
+     , cd.pb_current_state_code                                            AS state
+     , lkat.app_type                                                       AS pull_type
+     , COALESCE(ccat.dq_auto,
+                0)                             AS existing_dq_count
+     , CASE
+           WHEN COALESCE(ccat.num_tradelines) > 0 AND
+                COALESCE(ccat.auth_tradelines) > 0
+               THEN COALESCE(ccat.auth_tradelines)::float /
+                    COALESCE(ccat.num_tradelines)::float
+           ELSE 0.0 END                                                    AS pct_auth_tradelines
+     , COALESCE(ccat.open_tradelines,0)                AS open_tl
+     , COALESCE(ccat.prev_chargeoff, 0)               AS prev_co_count
+     , CASE
+           WHEN dru.RiskDealerGroup in ('KMX', 'MCY') THEN dru.RiskDealerGroup
+           WHEN dap."dealer level loss adjustment" = 'F' THEN 'E'
+           ELSE dap."dealer level loss adjustment" END                     AS lob_or_bucket
+     , case
+           when cd.con_apr < .20 then 'A'
+           when cd.con_apr < .24 then 'B'
+           when cd.con_apr < .28 then 'C'
+           else 'D'
+    end                                                                    as apr_bucket
+     , case
+           when cd.application_received_date >= '2024-12-16'
+               then 0
+           when cd.application_received_date >= '2024-11-7' and cd.application_received_date < '2024-12-16' and
+                lrn.ghostfile < 250 then 0
+           else 1 end                                                      as fico_adjustment_flag
+
+     , case
+           when risk_model_version = 3.1 and dru.riskdealergroup = 'KMX' then 'MTN3.1'
+           else '' end                                                     as mtn_model     --blended KMX scores
+--      , fd.sentilink_score
+--      , pp_score,
+
+
+FROM edwnpi.los_deal_current_fact AS cd
+
+         inner join ods.sfs_booked_contracts_scd con
+                    on con.sfs_application_number = cd.sfs_application_number and con.current_version_flag = 1
+
+         LEFT JOIN edwnpi.dealer_rollup_scd_current AS dru
+                   ON dru.dealer_number = cd.dealer_number
+         LEFT JOIN edwnpi.date_dim AS dd
+                   ON cd.book_date = dd.calendar_date
+    --LEFT JOIN #temp_blackbook_values AS bbvt
+         LEFT join sandbox.rds_blackbook_rollup bbvt
+                   ON con.sfs_application_number = bbvt.sfs_application_number and bb_value_source = 'sandbox.sfs_vehicles' and bb_value_type = 'history_adjusted_wholesale_avg'
+         LEFT JOIN edwnpi.dealer_attributes_pivot AS dap
+                   ON cd.dealer_number = dap.dealerid AND dap.datasourceid = 17
+             Left join (select loan_id,
+                           application_received_date,
+                           deal_detail_id,
+                           source_document_id,
+                           row_number()
+                           over (partition by source_document_id order by application_received_date desc) rn
+                    from odsnpi.sfs_deal_detail_scd
+                    where current_version_flag = 1
+                      and aspect = 'application') app
+                   on cd.sfs_application_number = app.source_document_id and app.rn = 1
+         left join odsnpi.sfs_deal_customer_scd pb_id
+                   on app.deal_detail_id = pb_id.deal_detail_id and
+                      pb_id.customer_role = 'Primary' and
+                      pb_id.current_version_flag = 1
+             left join odsnpi.sfs_deal_customer_scd cb_id
+                   on app.deal_detail_id = pb_id.deal_detail_id and
+                      pb_id.customer_role = 'Auxiliary' and
+                      pb_id.current_version_flag = 1
+
+         Left join (select loan_id,
+                           application_received_date,
+                           deal_detail_id,
+                           source_document_id,
+                           row_number()
+                           over (partition by source_document_id order by application_received_date desc) rn
+                    from odsnpi.sfs_deal_detail_scd
+                    where current_version_flag = 1
+                      and aspect = 'application') app_detail
+                   on cd.sfs_application_number = app_detail.source_document_id and app_detail.rn = 1
+
+
+         left join (select *, row_number() over (partition by deal_detail_id order by created_dtm desc) rn
+                    from odsnpi.sfs_deal_scenario_scd
+                    where scenario_type = 'Application') dec
+                   on app_detail.deal_detail_id = dec.deal_detail_id and
+                      dec.rn = 1
+
+         LEFT JOIN edwnpi.crm_dealer_dim AS cdd
+                   ON cdd.dealer_number = cd.dealer_number
+                       AND cdd.current_version_flag = 1
+         LEFT JOIN #temp_employment_type AS ett
+                   ON ett.account_number = cd.account_number
+         LEFT JOIN sandbox.kmx_los_new_sp lkat
+                   ON lkat.loan_id = cd.loan_id
+         LEFT JOIN #temp_sfs_customer_credit_attributes AS ccat
+                   ON ccat.sfs_application_number = cd.sfs_application_number
+    --cb_chime_flag adj
+         LEFT JOIN #temp_sfs_customer_credit_attributes AS cbcat
+                   ON cbcat.sfs_application_number = cd.sfs_application_number
+         LEFT JOIN sandbox.loan_random_numbers lrn
+                   ON lrn.loan_id = cd.loan_id
+
+
+--          LEFT JOIN sandbox.fraud_data_gs fd
+--                    ON fd.account_number = cd.account_number
+
+--          LEFT JOIN sandbox.student_loan_flag stu
+--                    ON stu.loan_id = cd.loan_id
+
+--          LEFT JOIN #temp_fraud as fraud
+--                    ON fraud.loan_id = cd.loan_id
+
+
+WHERE
+--                    bbvt.bb_value > 0
+--   AND
+                   cd.data_source_name != 'SPARTAN'
+  and cd.data_source_id = 101
+  AND cd.book_date IS NOT NULL
+  AND con.application_date < '2025-10-07'
+--  and cd_model_score >= 140
+ ;

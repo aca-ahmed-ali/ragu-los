@@ -1,0 +1,167 @@
+
+with reports as (select crs.customer_id,
+                        attr.attribute_value::int as                                           raw_vantage,
+                        case
+                            when raw_vantage < 300 or raw_vantage > 850
+                                then null
+                            else raw_vantage end  as                                           vantage,
+                        row_number() over (partition by customer_id order by report_date desc) rn
+                 from odsnpi.sfs_customer_report_scd crs
+                          left join odsnpi.sfs_customer_report_attribute_scd attr
+                                    on crs.customer_report_id =
+                                       attr.customer_report_id and
+                                       attr.attribute_name =
+                                       'ConsumerCreditScore' and
+                                       attr.current_version_flag = 1
+                 where report_type = 'Bureau'
+                   and crs.current_version_flag = 1)
+select cd.account_number,
+       app.application_received_date                                       as application_received_dtm,
+       cd.book_date,
+       'STE'                                                               as lob,
+       case
+           when pb.vantage is not null and cb.vantage is not null then (pb.vantage + cb.vantage) / 2
+           when pb.vantage is not null then pb.vantage
+           when cb.vantage is not null then cb.vantage
+           else null end                                                   as vantage,
+       con.model_score                                                     as con_risk_model_score,
+       cd.cash_down                                                        as con_cash_down_amt,
+       
+        cd.book_amount                                                      as con_amount_financed_back,
+
+       
+       
+       con.discount_amt                                                    as pricing_discount,
+       
+       case when cd.purchase_type ilike 'new' then  500 else 400 end as management_fee,
+        coalesce(cd.processing_fee, 0) as processing_fee,
+        coalesce(cd.dealer_part_amt, 0) as dealer_flats,
+        coalesce(ap.watch_list_fee_amt, 0) as watch_list_fee,
+        
+        
+        pricing_discount - management_fee - dealer_flats + watch_list_fee + processing_fee as discount, --finance_discount
+
+
+       discount /  con_amount_financed_back                                              as discount_percent,
+       cd.contract_rate                                                    as con_apr,
+
+       dec.total_income_amt                                                as total_income_dec,
+
+       case when con.total_income_amt < 2 * dec.total_income_amt then con.total_income_amt end as total_income,
+
+       con.payment_back_amt                                                as con_payment_back_amt,
+       cd.book_pti                                                         as con_pti_back,
+       cd.mileage                                                          as purchase_odometer,
+       cd.model_year                                                       as purchase_year,
+       cd.purchase_type                                                    as purchase_type,
+       case
+           when ((coll.year - 1)::char(4) || '-09-01'):: date > cd.book_date
+               then 1 / 365.25
+           else datediff(day, ((coll.year - 1):: char(4) || '-09-01'):: date,
+                         cd.book_date) /
+                365.25
+           end
+                                                                           as veh_age,
+       bb.blackbook                                                        as bb_value,
+       case when bb_value > 0 then cd.book_amount / bb_value else null end as bbltv
+--        case when book_date is not null then 1.0 else 0.0 end               as booked_flag
+from (select loan_id,
+             application_received_date,
+             deal_detail_id,
+             source_document_id,
+             row_number()
+             over (partition by source_document_id order by application_received_date desc) rn
+      from odsnpi.sfs_deal_detail_scd
+      where current_version_flag = 1
+        and aspect = 'application') app
+         left join (select loan_id,
+                           application_received_date,
+                           deal_detail_id,
+                           source_document_id,
+                           row_number()
+                           over (partition by source_document_id order by created_dtm desc) rn
+                    from odsnpi.sfs_deal_detail_scd
+                    where current_version_flag = 1
+                      and aspect = 'contract') con_id
+                   on app.source_document_id = con_id.source_document_id and con_id.rn = 1
+         left join (select source_document_id,
+                           min(application_received_date) as previous_decision
+                    from odsnpi.sfs_deal_detail_scd
+                    where current_version_flag = 1
+                      and aspect = 'application'
+                    group by source_document_id) prev
+                   on app.source_document_id = prev.source_document_id
+         left join odsnpi.sfs_deal_scenario_scd req
+                   on app.deal_detail_id = req.deal_detail_id and
+                      req.scenario_type = 'Adjusted' and
+                      req.current_version_flag = 1
+         left join odsnpi.sfs_deal_scenario_scd dec
+                   on app.deal_detail_id = dec.deal_detail_id and
+                      dec.scenario_type = 'Application' and dec.active_flag = 1 and
+                      dec.current_version_flag = 1
+         left join odsnpi.sfs_deal_scenario_scd con
+                   on con_id.deal_detail_id = con.deal_detail_id and
+                      con.scenario_type = 'Contract' and
+                      con.current_version_flag = 1
+         left join (select *,
+                           row_number() over (partition by deal_detail_id order by created_dtm desc) as index
+                    from odsnpi.sfs_deal_status_scd) stat
+                   on app.deal_detail_id = stat.deal_detail_id and
+                      stat.index = 1
+         left join odsnpi.sfs_deal_collateral_scd car
+                   on app.deal_detail_id = car.deal_detail_id and
+                      car.current_version_flag = 1 and
+                      car.collateral_role = 'Purchase'
+         left join (select collateral_id,
+                           evaluation_amt as blackbook
+                    from odsnpi.sfs_collateral_evaluation_scd
+                    where source = 'Blackbook'
+                     --  and name = 'HistoryAdjustedWholesale'
+                      and lower(name) in ('historyadjustedwholesale', 'hadjwholesale')
+ 
+                      and current_version_flag = 1) bb
+                   on car.collateral_id = bb.collateral_id
+         left join odsnpi.sfs_collateral_scd coll
+                   on car.collateral_id = coll.collateral_id
+         left join odsnpi.sfs_deal_customer_scd pb_id
+                   on app.deal_detail_id = pb_id.deal_detail_id and
+                      pb_id.customer_role = 'Primary' and
+                      pb_id.current_version_flag = 1
+         left join odsnpi.sfs_deal_customer_scd cb_id
+                   on app.deal_detail_id = cb_id.deal_detail_id and
+                      cb_id.customer_role = 'Auxiliary' and
+                      cb_id.current_version_flag = 1
+
+         left join reports pb
+                   on pb_id.customer_id = pb.customer_id and pb.rn = 1
+
+         left join reports cb
+                   on cb_id.customer_id = cb.customer_id and cb.rn = 1
+
+         left join odsnpi.sfs_booked_contracts_scd cd
+                   on app.source_document_id = cd.sfs_application_number and cd.current_version_flag = 1
+         left join odsnpi.sfs_applications_scd ap
+                   on app.source_document_id = ap.sfs_application_number and ap.current_version_flag = 1
+where app.rn = 1
+and book_date is not null
+-- and con.model_score >= 126
+-- and con_pti_back <= 0.2
+
+
+;
+
+
+
+
+
+-- select 0.0 as pricing_discount,
+--        case when cd.purchase_type ilike 'new' then  500
+-- else 400 end as management_fee,
+--     coalesce(cd.processing_fee, 0) as processing_fee,
+--     coalesce(cd.dealer_part_amt, 0) as dealer_flats,
+--     coalesce(ap.watch_list_fee_amt, 0) as watch_list_fee,
+--     pricing_discount + management_fee + dealer_flats - watch_list_fee - processing_fee as finance_discount
+-- from odsnpi.sfs_booked_contracts_scd cd
+-- left join odsnpi.sfs_applications_scd ap
+-- on cd.sfs_application_number = ap.sfs_application_number and ap.current_version_flag = 1
+-- where cd.current_version_flag = 1

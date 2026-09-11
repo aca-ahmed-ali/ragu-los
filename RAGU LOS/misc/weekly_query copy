@@ -1,0 +1,169 @@
+with sfsbb as (with bb5 as
+                        (select vin, blackbook_value
+                         from sandbox.shiny_blackbook_template21_reports
+                         union all
+                         select vin, blackbook_value
+                         from sandbox.sfs_blackbook_template21_reports)
+                   (select vin,
+                           max(blackbook_value) as bb_value
+                    from edwnpi.los_deal_current_fact cd
+                             left join bb5 on bb5.vin = cd.purchase_vin
+                    where cd.account_number is not null
+                    group by bb5.vin)),
+     allbb as (select account_number, max(bb_value) as bb_value
+               --from sandbox.bbv_g
+                 from sandbox.rds_blackbook_rollup
+               group by account_number),
+ vantage_los as (SELECT customer_id
+                          , cast(MAX(CASE WHEN (attribute_name = 'Score_5402_1') THEN attribute_value END) as int) AS vantage
+                     FROM odsnpi.los_customer_report_scd cr
+                              left join
+                          odsnpi.los_customer_report_attribute_scd cra
+                          on cra.customer_report_id = cr.customer_report_id and cra.current_version_flag = 1 and
+                             cr.current_version_flag = 1
+                     GROUP BY customer_id
+),
+ ste_vantage_pb as (SELECT cd.sfs_application_number
+                         , cast(MAX(COALESCE(
+                               CASE WHEN attribute_name = 'Score_5402_1' AND attribute_value > 300
+                                    THEN attribute_value ELSE null END,
+                               CASE WHEN attribute_name = 'ConsumerCreditScore'
+                                    THEN attribute_value END)) as int) AS vantage
+                    FROM odsnpi.sfs_booked_contracts_scd cd
+                    LEFT JOIN sandbox.sfs_customer_attributes cust
+                        ON cd.application_number = cust.loan_id
+                        AND cust.customer_role = 'primary'
+                    WHERE cd.current_version_flag = 1
+                    GROUP BY cd.sfs_application_number
+),
+ ste_vantage_cb as (SELECT cd.sfs_application_number
+                         , cast(MAX(COALESCE(
+                               CASE WHEN attribute_name = 'Score_5402_1' AND attribute_value > 300
+                                    THEN attribute_value ELSE null END,
+                               CASE WHEN attribute_name = 'ConsumerCreditScore'
+                                    THEN attribute_value END)) as int) AS vantage
+                    FROM odsnpi.sfs_booked_contracts_scd cd
+                    LEFT JOIN sandbox.sfs_customer_attributes cust
+                        ON cd.application_number = cust.loan_id
+                        AND cust.customer_role = 'auxiliary'
+                    WHERE cd.current_version_flag = 1
+                    GROUP BY cd.sfs_application_number
+)
+
+
+select
+
+
+
+    cd.account_number,
+    cd.con_payment_back_amt,
+    cd.con_ltv_back,
+    cd.con_amount_financed_back,
+    --cd.con_pricing_discount_percent,
+    cd.disb_acquisition_fee_amt,
+
+(cd.disb_acquisition_fee_amt - 250 - CASE WHEN cd.con_risk_model_score > 135 THEN 200 ELSE 0 END) as ent_disc,
+    --cd.wholesale_adjusted_value_purchased,
+    cd.con_apr,
+    cd.application_received_dtm,
+    cd.con_pti_back,
+    cd.con_cash_down_amt,
+    cd.purchase_odometer,
+    cd.purchase_year, --cd.model_year_purchased,
+    cd.book_date,
+
+cd.risk_model_name,
+cd.risk_model_version,
+    cd.con_risk_model_score,
+    ((date_part(month, cd.book_date)/12) + date_part(year, cd.book_date)) - (cd.purchase_year - 0.25) as veh_age,
+(case when (sbcs.appl_fico is not null and sbcs.co_appl_fico is not null) then (sbcs.appl_fico + sbcs.co_appl_fico)/2.0  when (sbcs.appl_fico is null and sbcs.co_appl_fico is not null) then sbcs.co_appl_fico else sbcs.appl_fico end)    as sfs_fico,
+--cd.dealer_pricing_hurdle,
+-- dd.pricing_hurdle_name as dim_lob,
+dru.riskdealergroup as lob,
+
+
+    cd.pb_monthly_income_gross_total as income_pb,
+    case when cd.cb_monthly_income_gross_total is null then 0 else cd.cb_monthly_income_gross_total end as income_cb,
+    case when cd.pb_fico_score is null or cd.pb_fico_score < 350 or cd.pb_fico_score > 850 then 0 else cd.pb_fico_score end as adj_fico,
+--     case when sfs_fico is null or sfs_fico< 350 or sfs_fico > 850 then 0 else sfs_fico end as adj_sfs_fico,
+--     cd.pb_vantage_score as vantage,
+
+
+    CASE
+        WHEN dru.riskdealergroup = 'STE' THEN
+            CASE
+                WHEN svcb.vantage IS NULL THEN svpb.vantage
+                ELSE (svpb.vantage + svcb.vantage) / 2.0
+            END
+        WHEN cd.book_date < '2022-04-01' THEN
+            CASE
+                WHEN cb_fico_score IS NULL THEN pb_fico_score
+                ELSE (pb_fico_score + cb_fico_score) / 2.0
+            END
+        ELSE
+            CASE
+                WHEN cb_vantage_score IS NULL THEN pb_vantage_score
+                ELSE (pb_vantage_score + cb_vantage_score) / 2.0
+            END
+    END AS vantage,
+
+
+
+
+-- COMMENT THIS OUT TO REVERT TO ORIGINAL
+
+--    case when van.vantage<=4 then 0 else van.vantage end as vantage,
+--     van.vantage as vantage,
+
+    --case when cd.data_source_id = 101 then sfsbb.bb_value else allbb.bb_value end as bb_value,
+
+
+
+-- revert back to allbb.bb_value once the sandbox rollup table is updated
+CASE
+    WHEN dru.riskdealergroup = 'KMX' THEN COALESCE(allbb.bb_value, cd.blackbook_history_adj_wholesale_amt)
+    WHEN cd.application_received_dtm < '2026-03-15' THEN allbb.bb_value
+    ELSE cd.blackbook_history_adj_wholesale_amt
+END as bb_value,
+    /*bb1.oldblackbook as old_bb_val,
+    bb2.newblackbook as new_bb_val,
+    bb3.newerQ2blackbook as newer_bb_val,
+    bb4.blackbook_value as kmx_bb_val,
+    bb5.blackbook_value as sfs_bb_val,*/
+--sfsbb.bb_value as sfs_bb_val,
+cd.data_source_id,
+sas.aca_fee,
+sas.aca_usury_fee_amt,
+sbcs.processing_fee,
+sbcs.dealer_part_amt,
+sas.stellantis_make_flag,
+sas.purchase_type,
+sas.received_date,
+sas.watch_list_fee_amt
+from edwnpi.los_deal_current_fact cd
+-- left join edwnpi.crm_dealer_dim dd on cd.dealer_number = dd.dealer_number
+left join edwnpi.dealer_rollup_scd_current dru on dru.dealer_number = cd.dealer_number
+
+left join vantage_los van on cd.pb_customer_id = van.customer_id--cd.borrower_id = van.customerid
+
+
+/*left join bb1 on cd.account_number = bb1.account_number
+left join bb2 on cd.loan_id = bb2.loan_id
+left join bb3 on cd.loan_id = bb3.loan_id
+left join bb4 on cd.account_number = bb4.account_number
+left join bb5 on cd.account_number = bb5.account_number*/
+
+
+left join allbb  on allbb.account_number = cd.account_number
+left join sfsbb on sfsbb.vin = cd.purchase_vin
+left join odsnpi.sfs_booked_contracts_scd sbcs on cd.account_number = sbcs.account_number and sbcs.current_version_flag = 1
+left join ste_vantage_pb svpb on sbcs.sfs_application_number = svpb.sfs_application_number
+left join ste_vantage_cb svcb on sbcs.sfs_application_number = svcb.sfs_application_number
+left join odsnpi.sfs_applications_scd sas on sbcs.sfs_application_number = sas.sfs_application_number and sas.current_version_flag = 1
+where 
+-- dd.current_version_flag = 1
+-- and
+ cd.book_date >= '2020-01-01'
+and cd.data_source_name != 'SPARTAN'
+and (dru.riskdealergroup != 'STE' OR cd.application_received_dtm < '2025-10-07')
+and cd.account_number!= 90124841967;

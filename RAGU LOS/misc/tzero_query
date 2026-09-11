@@ -1,0 +1,61 @@
+with sfsbb as (with bb5 as
+                        (select vin, blackbook_value
+                         from sandbox.shiny_blackbook_template21_reports
+                         union all
+                         select vin, blackbook_value
+                         from sandbox.sfs_blackbook_template21_reports)
+                   (select vin,
+                           max(blackbook_value) as bb_value
+                    from edwnpi.los_deal_current_fact cd
+                             left join bb5 on bb5.vin = cd.purchase_vin
+                    where cd.account_number is not null
+                    group by bb5.vin)),
+     allbb as (select account_number, max(bb_value) as bb_value
+               --from sandbox.bbv_g
+                 from sandbox.rds_blackbook_rollup
+               group by account_number)
+
+select
+    cd.account_number,
+    cd.con_payment_back_amt,
+    cd.con_ltv_back,
+    cd.con_amount_financed_back,
+    cd.disb_acquisition_fee_amt/cd.con_amount_financed_back as disc_pct,
+    cd.disb_acquisition_fee_amt,
+(cd.disb_acquisition_fee_amt - 250 - CASE WHEN cd.con_risk_model_score > 135 THEN 200 ELSE 0 END) as ent_disc,
+    --cd.wholesale_adjusted_value_purchased,
+    cd.con_apr,
+    cd.application_received_dtm,
+    cd.con_pti_back,
+    cd.con_cash_down_amt,
+    cd.purchase_odometer,
+    cd.purchase_year,
+    cd.book_date,
+    cd.con_risk_model_score,
+cd.risk_model_name,
+cd.risk_model_version,
+    ((date_part(month, cd.book_date)/12) + date_part(year, cd.book_date)) - (cd.purchase_year - 0.25) as veh_age,
+    cd.pb_fico_score,
+    dd.pricing_hurdle_name,
+    cd.pb_monthly_income_gross_total as income_pb,
+    case when cd.cb_monthly_income_gross_total is null then 0 else cd.cb_monthly_income_gross_total end as income_cb,
+    case when cd.pb_fico_score is null or cd.pb_fico_score < 350 or cd.pb_fico_score > 850 then 0 else cd.pb_fico_score end as adj_fico,
+    cd.pb_vantage_score as vantage,
+    --van.vantage,
+case when cd.data_source_id = 101 then sfsbb.bb_value else allbb.bb_value end as bb_value,
+cd.data_source_id,
+sas.aca_fee,
+sas.aca_usury_fee_amt,
+dru.riskdealergroup
+from edwnpi.los_deal_current_fact cd
+inner join edwnpi.crm_dealer_dim dd on cd.dealer_number = dd.dealer_number
+inner join edwnpi.dealer_rollup_scd_current dru on dru.dealer_number = cd.dealer_number
+left join allbb  on allbb.account_number = cd.account_number
+left join sfsbb on sfsbb.vin = cd.purchase_vin
+left join odsnpi.sfs_booked_contracts_scd sbcs on cd.account_number = sbcs.account_number and sbcs.current_version_flag = 1
+left join odsnpi.sfs_applications_scd sas on sbcs.sfs_application_number = sas.sfs_application_number and sas.current_version_flag = 1
+where dd.current_version_flag = 1
+--and cd.pricing_model_score is not null
+and cd.book_date >= '2019-01-01'
+and cd.data_source_name != 'SPARTAN'
+and cd.account_number!= 90124841967

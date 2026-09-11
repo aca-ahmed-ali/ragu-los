@@ -1,0 +1,5 @@
+select roa_dealer_group, #orig.vintage as vintage, origination/t.total as distribution
+from #orig
+left join #total_orig t on #orig.vintage = t.vintage
+where t.vintage!= '2015'
+order by roa_dealer_group, vintage;

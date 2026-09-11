@@ -1,0 +1,25 @@
+SELECT cd.account_number
+     , cd.book_date
+     , application_received_date AS app_date
+     , dd.calendar_week AS book_week
+     , case when dru. previous_riskdealergroup = '' then dru.riskdealergroup else dru.previous_riskdealergroup end  AS lob
+     , cd.con_risk_model_score AS model_score
+     , cd.con_amount_financed_back AS amt_financed
+     , case
+           when cd.con_apr < .20 then 'A'
+           when cd.con_apr < .24 then 'B'
+           when cd.con_apr < .28 then 'C'
+           else 'D'
+           end                               as apr_bucket
+FROM  edwnpi.los_deal_current_fact AS cd
+LEFT JOIN edwnpi.dealer_rollup_scd_current AS dru
+    ON dru.dealer_number = cd.dealer_number
+LEFT JOIN edwnpi.date_dim AS dd
+    ON cd.book_date = dd.calendar_date
+WHERE dru.riskdealergroup IN ('FRN', 'AN', 'STG', 'FLD', 'ENT', 'KMX')
+  AND cd.data_source_name != 'SPARTAN'
+  AND amt_financed <= 100000
+  AND model_score > 0
+  AND cd.book_date >= {min_book_date}
+  AND cd.book_date is not null
+  --AND ((dru.riskdealergroup = 'KMX' and risk_model_version = 3.1 and app_date>='2024-12-01') or (dru.riskdealergroup = 'KMX' and app_date<'2024-12-01') or dru.riskdealergroup !='KMX')

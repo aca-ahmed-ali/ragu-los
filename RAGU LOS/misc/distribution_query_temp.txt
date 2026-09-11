@@ -1,0 +1,23 @@
+DROP TABLE IF EXISTS #total_orig;
+select case
+           when vintage_quarterly / 10 < 2020 then vintage_quarterly / 10
+           else vintage_quarterly end as vintage,
+       sum(originations_nb)           as total
+into #total_orig
+from sandbox.t0q
+where is_current_flag = 1
+  and insert_month = case when vintage = 20253 then 1 else 3 end
+  and roa_dealer_group IN ('KMX', 'AN', 'STG', 'ENT', 'FLD', 'FRN')
+group by vintage;
+
+DROP TABLE IF EXISTS #orig;
+select roa_dealer_group,
+       case when vintage_quarterly / 10 < 2020 then vintage_quarterly / 10 else vintage_quarterly end as vintage,
+       sum(originations_nb)        as origination
+into #orig
+from sandbox.t0q
+where is_current_flag = 1
+  and insert_month = case when vintage = 20253 then 1 else 3 end
+  and roa_dealer_group IN ('KMX', 'AN', 'STG', 'ENT', 'FLD', 'FRN')
+group by roa_dealer_group, vintage
+order by roa_dealer_group, vintage;

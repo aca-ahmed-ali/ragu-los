@@ -1,0 +1,2 @@
+select dll_edition, dealer_number, valid_vintage, loss_ratio, dealer_level, pricing_scalar from sandbox.nonkmx_dealer_loss_data where ((left(valid_vintage,4) > 2019 and dll_edition ='2025 Q3 FRN3.1.2') or (left(valid_vintage,4) <= 2019 and dll_edition = '2024 Q4 FRN3.1'))
+--select * from sandbox.historical_dealer_level_assignments

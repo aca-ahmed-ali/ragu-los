@@ -1,0 +1,27 @@
+
+
+select account_number
+     , con_date         AS book_date
+     , con_date         AS app_date
+     , dd.calendar_week AS book_week
+     , dd.calendar_week AS app_week
+
+     , lob
+     , pred_t0_adj_impound
+     , pred_depr_rate_std
+
+
+     , case
+           when lob IN ('KMX', 'ENT', 'FLD') then 0.15 * (pred_t0_adj_impound * (1 - pred_depr_rate_std) ^ 2.3) + 0.85 * (pred_t0_adj_no_impound * (1 - pred_depr_rate_std) ^ 2.3)
+
+           else 0.15 * (pred_t0_adj_impound * (1 - pred_depr_rate_std) ^ 2) + 0.85 * (pred_t0_adj_no_impound * (1 - pred_depr_rate_std) ^ 2)
+    end                 as new_recovery_multiplier
+
+
+from sandbox.rds_rec_model_originations rec
+         LEFT JOIN edwnpi.date_dim AS dd
+                   ON rec.con_date = dd.calendar_date;
+
+
+
+-- once we have tags we can raise each multiplier to the tag numbers 

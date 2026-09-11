@@ -1,0 +1,115 @@
+--establish_temp_tables_query
+-- Unit Loss Queries
+
+DROP TABLE IF EXISTS #temp_employment_type;
+SELECT cd.account_number
+     , CASE
+           WHEN pb_primary_job_title ILIKE '%server%' OR pb_primary_job_title ILIKE '%waiter%' OR
+                pb_primary_job_title ILIKE '%waitress%' OR pb_primary_job_title ILIKE '%waitstaff%' OR
+                pb_primary_job_title ILIKE '%bartender%'
+               THEN 'waiter'
+           WHEN pb_primary_job_title ILIKE '%painter%' OR pb_primary_job_title ILIKE '%landscap%' OR
+                pb_primary_job_title ILIKE '%tempo%' OR pb_primary_job_title ILIKE '%manpower%' OR
+                pb_primary_job_title ILIKE '%kelly%' OR pb_primary_job_title ILIKE '%spherion%' OR
+                pb_primary_job_title ILIKE '%kforce%' OR pb_primary_job_title ilike '%staffing%' OR
+                pb_primary_job_title ILIKE '%personnel%'
+               OR pb_primary_employer ILIKE '%painter%' OR pb_primary_employer ILIKE '%landscap%' OR
+                pb_primary_employer ILIKE '%tempo%' OR pb_primary_employer ILIKE '%manpower%' OR
+                pb_primary_employer ILIKE '%kelly%' OR pb_primary_employer ILIKE '%spherion%' OR
+                pb_primary_employer ILIKE '%kforce%' OR pb_primary_employer ILIKE '%staffing%' OR
+                pb_primary_employer ILIKE '%personnel%'
+               THEN 'seasonal'
+           ELSE 'not seasonal or waiter' END AS employment_type
+INTO #temp_employment_type
+FROM edwnpi.los_deal_current_fact cd
+WHERE cd.book_date >= '2016-01-01'
+  and cd.data_source_name != 'SPARTAN';
+
+
+DROP TABLE IF EXISTS #temp_customer_credit_attributes;
+SELECT customer_id
+     , CASE WHEN MAX(CASE WHEN (attribute_name = 'P_AUT_DQ001') THEN attribute_value END) > 0 THEN 1 ELSE 0 END AS dq_auto
+     , MAX(CASE WHEN (attribute_name = 'Score_5402_1') THEN attribute_value END)                                      AS vantage
+     , MAX(CASE WHEN (attribute_name = 'Score_5207_1') THEN attribute_value END)                                      AS  fico
+     , COALESCE((MAX(CASE WHEN (attribute_name = 'P_CCS_EX001') THEN attribute_value::int END) > 0)::int,
+                0)                                                                                      AS secured_credit_card
+     , COALESCE(MAX(CASE WHEN (attribute_name IN ('SUCI136', 'C_CIN_EX001')) THEN attribute_value::int END),
+                0)                                                                                      AS num_tradelines
+     , COALESCE(MAX(CASE WHEN (attribute_name IN ('SUC2062', 'C_CIN_EX013')) THEN attribute_value::int END),
+                0)                                                                                      AS auth_tradelines
+     , COALESCE(MAX(CASE WHEN (attribute_name = 'ACAChargeoff') THEN attribute_value::int END),
+                0)                                                                                      AS prev_chargeoff
+     ,COALESCE(MAX(CASE WHEN (attribute_name IN ('C_CIN_EX002')) THEN attribute_value::int END),
+                0)                                                                                      AS open_tradelines
+INTO #temp_customer_credit_attributes
+FROM odsnpi.los_customer_report_scd cr
+left join
+    odsnpi.los_customer_report_attribute_scd cra
+on cra.customer_report_id = cr.customer_report_id and cra.current_version_flag =1 and cr.current_version_flag=1
+GROUP BY customer_id;
+
+----------------------------
+-- Recovery Queries
+
+DROP TABLE IF EXISTS #temp_blackbook_values;
+WITH btr_trimmed_json_table AS (SELECT loan_id,
+                                       CASE
+                                           WHEN MAX(created_utc_dtm) <= '2023-05-22' THEN 0.88 * MAX(blackbook_value)
+                                           ELSE MAX(blackbook_value) END                                                                            AS bb_value_new,
+                                       TRIM('"' FROM
+                                            JSON_SERIALIZE(blackbook_template16_response_json."used_vehicles"."used_vehicle_list"[0]."class_name")) AS car_class_new,
+                                       TRIM('"' FROM
+                                            JSON_SERIALIZE(blackbook_template16_response_json."used_vehicles"."used_vehicle_list"[0]."fuel_type"))  AS car_fuel_new
+                                FROM sandbox.blackbook_template16_reports
+                                WHERE blackbook_value IS NOT NULL
+                                  AND blackbook_value != 0
+                                GROUP BY loan_id, car_class_new, car_fuel_new)
+   , un_duplicated_kmx_blackbook AS (SELECT account_number, AVG(blackbook_value) AS bb_value
+                                     FROM sandbox.kmx_blackbook
+                                     GROUP BY account_number)
+  , btr_trimmed_json_table_kmx AS (select distinct btrim(upper(bb.vin)) as vin,
+    veh_class as car_class_new,
+    veh_fuel as car_fuel_new,
+    case
+        when veh_fuel ilike '%Gas%' then 1
+        when veh_fuel = 'Flex' then 2
+        when veh_fuel ilike '%Hybrid%' then 3
+        when veh_fuel = 'Diesel' then 4
+        else 5
+    end as fuel_prio
+from (select
+          vin,
+          trim('\\' from blackbook_template21_response_json::varchar) as json_clean,
+          regexp_substr(json_clean, '"class_name":"(\\w+[ -/]?\\w*[ -/]?\\w*[ -/]?\\w*)","class_name_long"', 1, 1, 'e') as veh_class,
+          regexp_substr(json_clean, '"fuel_type":"((\\w+[ -/]?)*)",', 1, 1, 'e') as veh_fuel
+      from sandbox.shiny_blackbook_template21_reports) bb
+where veh_class is not null and veh_class not ilike '%null%' and veh_class != ''
+    and veh_fuel is not null and veh_fuel not ilike '%null%' and veh_fuel != '')
+SELECT distinct cd.account_number
+              , COALESCE(kb.bb_value, hkb.wholesale_average_adjusted, bb22_23.used_car_wholesale_average_adjusted,
+                         btr.bb_value_new, rbov.wholesale_average_adjusted)           AS bb_wholesale
+              , COALESCE(bbi.vehicle_class_name,
+                         bb22_23.used_car_vehicle_class_name, btr.car_class_new,bbk2.car_class_new)      AS car_class
+              , COALESCE(bbi.extended_vehicle_class_name,
+                         bb22_23.used_car_extended_vehicle_class_name)                AS car_class_ext
+              , COALESCE(bbi.fuel_type, bb22_23.used_car_fuel_type, btr.car_fuel_new,bbk2.car_fuel_new) AS car_fuel
+INTO #temp_blackbook_values
+FROM edwnpi.los_deal_current_fact AS cd
+         LEFT JOIN sandbox.rds_blackbook_origination_values AS rbov -- Pre-2023 Q1, all LOB (values)
+                   ON cd.account_number = rbov.account_number
+                       AND cd.purchase_odometer = rbov.mileage_at_origination
+         LEFT JOIN sandbox.rds_blackbook_vehicle_info AS bbi -- Pre-2023 Q1, all LOB (info)
+                   ON cd.account_number = bbi.account_number
+         LEFT JOIN sandbox.historical_blackbook_q2_2022_q2_2023 AS bb22_23 -- 2022 Q1-2023 Q2, all LOB (values and info)
+                   ON cd.loan_id = bb22_23.appid
+         LEFT JOIN btr_trimmed_json_table AS btr -- 2023 Q2+, nonKMX (values and JSON)
+                   ON cd.loan_id = btr.loan_id
+         LEFT JOIN un_duplicated_kmx_blackbook AS kb
+                   ON cd.account_number = kb.account_number
+         LEFT JOIN btr_trimmed_json_table_kmx AS bbk2
+                    on bbk2.vin = cd.purchase_vin
+         LEFT JOIN sandbox.historical_KMX_blackbook AS hkb -- Assortment of KMX 2018 Q2 to 2023 Q4
+                   ON cd.loan_id = hkb.application_id
+         LEFT JOIN edwnpi.dealer_rollup_scd_current AS dru
+                   ON cd.dealer_number = dru.dealer_number
+WHERE cd.account_number is NOT NULL;

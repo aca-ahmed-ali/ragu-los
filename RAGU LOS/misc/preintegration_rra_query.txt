@@ -1,0 +1,41 @@
+
+SELECT cd.account_number,
+       cd.book_date,
+       dd.calendar_week               AS book_week,
+       date(application_received_dtm) as app_date,
+       'STG'                          AS lob,
+       cd.purchase_year               AS car_year,
+       cd.purchase_make               AS car_make,
+       cd.purchase_model              AS car_model,
+       cd.purchase_odometer           AS mileage_orig,
+       --bbvt.bb_wholesale                     AS bb_value,
+       bbvt.bb_value                  AS bb_value,
+       cd.con_sales_price             AS sale_price,
+       --bbvt.car_class                        AS vehicle_class,
+       bbvt.veh_class                 as vehicle_class,
+       --bbvt.car_class_ext                    AS vehicle_class_extended,
+       --bbvt.car_fuel                         AS fuel_type,
+       bbvt.veh_fuel                  as fuel_type,
+       cd.pb_primary_employer         AS job_company,
+       case
+           when cd.con_apr < .20 then 'A'
+           when cd.con_apr < .24 then 'B'
+           when cd.con_apr < .28 then 'C'
+           else 'D'
+           end                        as apr_bucket
+FROM edwnpi.los_deal_current_fact cd
+         inner join sfs_booked_contracts_scd con
+                    on cd.sfs_application_number = con.sfs_application_number and con.current_version_flag = 1
+         LEFT JOIN edwnpi.date_dim AS dd
+                   ON cd.book_date = dd.calendar_date
+    --LEFT JOIN #temp_blackbook_values AS bbvt
+         LEFT JOIN sandbox.rds_blackbook_rollup AS bbvt
+                   ON con.sfs_application_number = bbvt.sfs_application_number and bb_value_source = 'sandbox.sfs_vehicles' and bb_value_type = 'history_adjusted_wholesale_avg'
+
+WHERE con.sfs_application_number IS NOT NULL
+  and cd.aspect = 'CONTRACT'
+--   AND bbvt.bb_value > 0
+  and cd.data_source_id = 101
+  AND con.application_date < '2025-10-07'
+  and cd.account_number != 90125103308
+  and cd.book_date is not null;

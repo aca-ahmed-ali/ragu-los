@@ -1,0 +1,96 @@
+SELECT ldcf.loan_id,
+       ldcf.aspect,
+       ldcf.adj_net_trade_amt,
+       ldcf.con_cash_down_amt,
+       ldcf.con_pti_back,
+       ldcf.pb_vantage_score,
+       ldcf.application_received_date,
+       ldcf.con_amount_financed_back,
+       CASE
+           WHEN rh.callback_rehashed = 'A Call'
+               OR rh.callback_rehashed IS NULL
+               THEN rh.acall_mroa
+           ELSE rh.bcall_mroa
+           END + .0025 * rh.active_rehashpointsdiff                    AS booked_mroa,
+       rh.acall_discount_dollars,
+       rh.acall_totaldown,
+       DATE_PART(MONTH, ldcf.application_received_date)                AS month,
+       DATE_PART(QUARTER, ldcf.application_received_date)              AS quarter,
+       DATE_PART(YEAR, ldcf.application_received_date)                 AS year,
+       rh.acall_totaldown - ldcf.adj_net_trade_amt                     AS acall_cash,
+       rh.acall_discount_dollars < 1500                                AS discount_under_1500,
+       ldcf.dealer_pricing_hurdle                                      AS lob,
+       GREATEST(DATE_PART(YEAR, CURRENT_DATE) - ldcf.purchase_year, 0) AS vehicle_age,
+       CASE
+           WHEN ldcf.pb_ssn IN (999999999, 999999998)
+               THEN REGEXP_REPLACE(ldcf.pb_birth_date, '[^0-9]', '')
+           WHEN REGEXP_REPLACE(ldcf.pb_ssn, '[^0-9]', '') = ''
+               THEN NULL
+           ELSE REGEXP_REPLACE(ldcf.pb_ssn, '[^0-9]', '')
+           END                                                         AS pb_ssn,
+       CASE
+           WHEN ldcf.acall_sales_price >= 40000 THEN 40000
+           ELSE (ldcf.acall_sales_price::INT / 5000) * 5000
+           END                                                         AS sales_price_bucket,
+       CASE
+           WHEN ldcf.blackbook_history_adj_wholesale_amt IS NULL
+               OR ldcf.blackbook_history_adj_wholesale_amt < 100
+               THEN ldcf.coll_adj_wholesale_amt * (1 - vehicle_age * 0.02)
+           ELSE ldcf.blackbook_history_adj_wholesale_amt
+           END                                                         AS adj_bb_value,
+       adj_bb_value < 14000                                            AS is_affordable,
+       CASE
+           WHEN rh.acall_amtfin - ldcf.req_amount_financed_front
+                    BETWEEN -250 AND 250
+               AND dec.first_decision
+                    IN ('L', 'LC', 'Approved', 'Conditional Approval')
+               THEN 1
+           ELSE 0
+           END                                                         AS sa_flag,
+       CASE
+           WHEN (
+                    (
+                        rh.acall_discount_dollars <= 2500
+                            AND ABS(
+                                    rh.acall_amtfin - ldcf.adj_amount_financed_front
+                                ) <= 250
+                        )
+                        OR (
+                        rh.bcall_discount_dollars <= 2500
+                            AND ABS(
+                                    rh.bcall_amtfin - ldcf.adj_amount_financed_front
+                                ) <= 250
+                        )
+                    )
+               AND dec.last_decision
+                    NOT IN ('G', 'T', 'FT', 'Declined', 'Final Turndown')
+               THEN 1
+           ELSE 0
+           END                                                         AS full_call_flag,
+       ''                                                              AS none,
+       pt.test_name,
+       pt.test_group
+FROM edwnpi.los_deal_current_fact ldcf
+         JOIN (SELECT loan_id, test_name, test_group
+               FROM sandbox.pricing_tests
+               WHERE pricing_service_log_id IN (SELECT MIN(pricing_service_log_id)
+                                                FROM sandbox.pricing_tests
+                                                GROUP BY loan_id, test_name)) pt ON ldcf.loan_id = pt.loan_id
+         LEFT JOIN sandbox.rehashes rh
+              ON ldcf.loan_id = rh.appid
+         LEFT JOIN #decision dec
+                   ON ldcf.los_deal_current_fact_universal_id = dec.deal_detail_id
+WHERE ldcf.deal_deleted_flag = 0
+  AND ldcf.data_source_id = 100
+  AND ldcf.dealer_pricing_hurdle IN {lobs}
+    AND (ldcf.status_name = 'FUNDED' OR ldcf.aspect = 'APPLICATION')
+    AND ldcf.application_received_date
+        BETWEEN '{start_date}' AND
+            CASE
+                    WHEN ldcf.aspect = 'APPLICATION'
+                        THEN LEAST(
+                            '{end_date}', 
+                            DATEADD(DAY, -14, CURRENT_DATE)
+                        )
+                    ELSE '{end_date}'
+END;

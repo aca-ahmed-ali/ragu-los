@@ -1,0 +1,129 @@
+with jobs as (
+SELECT pce.customerid as customerid,
+       pce.datasourceid as datasourceid,
+       btrim(pe.occupation) as occupation,
+       btrim(pe.typcd) as job_type,
+       btrim(pe.empstatustyp) as empstatustyp,
+       btrim(pe.employername) as employername
+FROM odsnpi.prov_customer_employer pce
+  JOIN odsnpi.prov_employer pe
+      ON pce.employerid = pe.employerid
+          AND pce.datasourceid = pe.datasourceid
+WHERE btrim(pe.typcd) in ('CURRENT')
+  AND btrim(pe.empstatustyp) in ('CONTRACT', 'EMPLOYED', 'FULLTIME', 'MILITARY', 'OTHER', 'PARTTIME', 'SEASONAL', 'SELFEMPLOYED')
+  AND pe.occupation is not null AND btrim(pe.occupation) != ''
+),
+imps as (
+SELECT adf.account_number,
+       max(vr.impound_notification_date) as impound_notification_date,
+       max(vr.repossessed_date) as repo_date
+FROM edwnpi.svc_account_daily_fact adf
+  JOIN edwnpi.svc_vehicle_recovery_dim vr
+      ON adf.svc_vehicle_recovery_dim_row_id = vr.svc_vehicle_recovery_dim_row_id
+        AND vr.current_version_flag = 1
+GROUP BY adf.account_number
+),
+aucs as (
+SELECT account_number,
+       sale_price as auc_amt_acv,
+       sale_date as auc_date_acv,
+       auction_name as auc_name,
+       auction_grade_code as auc_grade,
+       CASE
+         WHEN mileage >= 888888 OR mileage = 333333 then null
+         ELSE mileage
+       END as mileage_auc
+FROM sandbox.auction_current_cp
+WHERE sale_price IS NOT NULL AND sale_price > 0
+    AND sale_date IS NOT NULL
+    AND sale_date >= '2015-01-01' AND sale_date <= '2023-07-31'
+),
+tl as (
+SELECT account_number,
+       vin,
+       MAX(insuranceclaimdate) as tl_date,
+       MAX(insurancepayment) as tl_pmt,
+       MAX(CASE WHEN
+             insuranceclaimdate is not null then 1
+             else 0
+           END) as tl_flag
+FROM sandbox.total_loss_claims
+WHERE insurancepayment IS NOT NULL AND insurancepayment > 0
+    AND insuranceclaimdate IS NOT NULL
+GROUP BY account_number, vin
+)
+SELECT cd.account_number,
+       cd.con_date,
+       cd.borrower_address_state_name as state_pb,
+       substring(dd.pricing_hurdle_name, 6) as lob,
+       drc.riskdealergroup as rdg,
+       cd.model_year_purchased as car_year,
+       cd.make_purchased as car_make,
+       cd.model_purchased as car_model,
+       cd.mileage_purchased as mileage_orig,
+       case
+         when (cd.model_traded is null or cd.model_traded = '') and
+              (cd.model_year_traded is null) and
+              (cd.vin_traded is null or cd.vin_traded = '') then 0
+         else 1
+       end as trade_flag,
+       COALESCE(bbv.wholesale_average_adjusted, bbn.used_car_wholesale_average_adjusted) as bb_wholesale,
+       COALESCE(bbi.vehicle_class_name, bbn.used_car_vehicle_class_name) as car_class,
+       COALESCE(bbi.fuel_type, bbn.used_car_fuel_type) as car_fuel,
+       mme.auction_sold_date as auc_date,
+       mme.auction_sold_amt as auc_amt,
+       mme.impound_indicator as impound_indicator_mme,
+       imps.repo_date as repo_date,
+       imps.impound_notification_date as impound_notification_date,
+       CASE WHEN
+           tl.tl_flag is not null then 1
+           else 0
+       END as tl_flag,
+       tl.tl_date as tl_date,
+       tl.tl_pmt as tl_pmt,
+       aucs.auc_amt_acv as auc_amt_acv,
+       aucs.auc_date_acv as auc_date_acv,
+       j.occupation as job,
+       j.empstatustyp as job_status,
+       j.employername as job_company,
+       j.job_type as job_type,
+       cd.borrower_employer_job_category as job_status_cd
+FROM edwnpi.contract_dim cd
+    JOIN edwnpi.crm_dealer_dim dd
+        ON cd.dealer_number = dd.dealer_number
+            AND cd.current_version_flag = 1
+            AND dd.current_version_flag = 1
+            AND cd.con_removed_flag = 0
+            AND cd.book_date IS NOT NULL
+            AND cd.con_date >= '2015-01-01'
+            AND cd.con_date < '2023-04-01'
+            AND cd.data_source_id <> 20
+    JOIN edwnpi.svc_master_monthend mme
+        ON cd.account_number = mme.account_number
+            AND mme.snapshot_date = '2023-07-31'
+            AND mme.auction_sold_amt > 0
+            AND mme.auction_sold_date IS NOT NULL
+    JOIN edwnpi.dealer_rollup_scd_current drc
+        ON cd.dealer_number = drc.dealer_number
+    LEFT JOIN tl
+        ON cd.account_number = tl.account_number
+            AND cd.vin_purchased = tl.vin
+    LEFT JOIN edwnpi.application_dim ad
+        ON cd.application_id = ad.application_id
+            AND cd.data_source_id = ad.data_source_id
+            AND ad.current_version_flag = 1
+    LEFT JOIN jobs j
+        ON ad.borrower_id = j.customerid
+            AND cd.data_source_id = j.datasourceid
+    LEFT JOIN sandbox.rds_blackbook_origination_values bbv
+        ON cd.account_number = bbv.account_number
+    LEFT JOIN sandbox.rds_blackbook_vehicle_info bbi
+        ON cd.account_number = bbi.account_number
+    LEFT JOIN sandbox.historical_blackbook_q2_2022_q2_2023 bbn
+        ON cd.application_id = bbn.appid
+    LEFT JOIN aucs
+        ON cd.account_number = aucs.account_number
+    LEFT JOIN imps
+        ON cd.account_number = imps.account_number
+WHERE (rdg NOT IN ('KMX', 'MCY', 'Core') OR rdg IS NULL)
+  AND bb_wholesale IS NOT NULL AND bb_wholesale > 0;

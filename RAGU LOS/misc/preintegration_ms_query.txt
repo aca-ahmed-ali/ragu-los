@@ -1,0 +1,40 @@
+SELECT cd.sfs_application_number
+     , cd.book_date
+     , application_date    AS app_date
+     , dd.calendar_week    AS book_week
+     , 'STG'               AS lob
+     , los.con_risk_model_score AS model_score
+     , cd.book_amount      AS amt_financed
+     , case
+           when cd.contract_rate < .20 then 'A'
+           when cd.contract_rate < .24 then 'B'
+           when cd.contract_rate < .28 then 'C'
+           else 'D'
+    end                    as apr_bucket
+FROM odsnpi.sfs_booked_contracts_scd AS cd
+
+    left join edwnpi.los_deal_current_fact los
+                     on cd.sfs_application_number = los.sfs_application_number
+
+         LEFT JOIN edwnpi.date_dim AS dd
+                   ON cd.book_date = dd.calendar_date
+         Left join (select loan_id,
+                           application_received_date,
+                           deal_detail_id,
+                           source_document_id,
+                           row_number()
+                           over (partition by source_document_id order by application_received_date desc) rn
+                    from odsnpi.sfs_deal_detail_scd
+                    where current_version_flag = 1
+                      and aspect = 'application') app
+                   on cd.sfs_application_number = app.source_document_id and app.rn = 1
+
+where
+--     cd.application_date >= '2025-10-07'
+cd.application_date < '2025-10-07'
+ and   model_score > 0
+ and data_source_id = 101
+  and cd.current_version_flag = 1
+  and cd.book_date is not null
+-- and model_score >= 140
+;

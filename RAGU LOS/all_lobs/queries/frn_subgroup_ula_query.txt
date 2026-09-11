@@ -1,0 +1,182 @@
+WITH dealers AS (
+    SELECT dealer_number,
+           COALESCE(
+               cdd.dealer_type_name,
+               CASE
+                   WHEN cdd.doing_business_as_name ~*
+                        '\b(honda|toyota|ford|chevrolet|chevy|gmc|dodge|chrysler|jeep|ram|buick|cadillac|lincoln|volkswagen|vw|audi|bmw|mercedes[-\s]?benz|mercedes|benz|porsche|volvo|subaru|mazda|nissan|infiniti|lexus|acura|hyundai|kia|genesis|mitsubishi|isuzu|suzuki|tesla|rivian|lucid|ferrari|lamborghini|maserati|alfa\s?romeo|fiat|peugeot|renault|citroen|seat|skoda|land\s?rover|jaguar|bentley|rolls[-\s]?royce|aston\s?martin|mclaren|bugatti|koenigsegg|pagani|lotus|mini|smart|scion|saturn|pontiac|oldsmobile|mercury|hummer|saab|lancia|dacia|opel|vauxhall|holden|daewoo|ssangyong|geely|byd|nio|xpeng|li\s?auto|great\s?wall|haval|chery|dongfeng|saic|foton|jac|tata|mahindra|maruti|hero|bajaj|royal\s?enfield|harley.?davidson|indian\s?motorcycle|triumph)\b'
+                       THEN 'Franchise'
+                   ELSE 'Independent'
+               END
+           ) AS dealer_type
+    FROM edwnpi.crm_dealer_dim cdd
+    WHERE pricing_hurdle_name = 'mROA-FRN'
+      AND current_version_flag = 1
+),
+student_loan AS (
+        SELECT
+            loan_id,
+            MAX(federal_student_loan_flag) AS student_loan_flag,
+            MAX(chime_flag)  as sandbox_chime
+        FROM sandbox.student_loan_chime_flags
+        GROUP BY 1
+),
+employment_agg AS (
+        SELECT account_number,
+               MAX(CASE WHEN employment_type = 'seasonal' THEN 1 ELSE 0 END) AS seasonal_flag,
+               MAX(CASE WHEN employment_type = 'waiter' THEN 1 ELSE 0 END)   AS waiter_flag
+        FROM sandbox.temp_employment_type_ragu
+        GROUP BY account_number
+)
+
+
+SELECT
+
+
+ cd.account_number
+
+     , cd.book_date
+     , dd.calendar_week                                                            AS book_week
+     , dd_app.calendar_week                                                        AS app_week
+     , dd.calendar_quarter_name                                                    AS book_vintage
+     , date(cd.application_received_dtm)                                           AS app_date
+    , CASE
+        WHEN dru.riskdealergroup = 'KMX' THEN COALESCE(bbvt.bb_value, cd.blackbook_history_adj_wholesale_amt)
+        WHEN cd.application_received_dtm < '2026-03-15' THEN bbvt.bb_value
+        ELSE cd.blackbook_history_adj_wholesale_amt
+      END AS bbvalue
+     ,cd.dealer_number                                                            AS dealer_number
+     , cd.con_sales_price                                     AS sale_price
+
+   , case when dru.riskdealergroup = 'FRN' and cdd.dealer_type_name = 'Independent' then 1
+        when dru.riskdealergroup = 'FRN' and cdd.dealer_type_name != 'Independent' then 0 else -1 end AS frni_flag
+
+     , cd.con_amount_financed_back                                                 AS amt_financed
+     , cd.con_amount_financed_front                                                AS amt_financed_front
+     , cd.con_cash_down_amt                                                        AS cash_down
+     , cd.con_net_trade_amt                                                        AS tradein_value
+     , cd.purchase_odometer                                                        AS mileage
+     , cd.con_risk_model_score                                                      AS cd_model_score
+     , CASE
+           WHEN (cd.pb_monthly_income_gross_total + coalesce(cd.cb_monthly_income_gross_total, 0)) < 1 THEN 1
+           ELSE cd.pb_monthly_income_gross_total + coalesce(cd.cb_monthly_income_gross_total, 0) END
+                                                                                   AS total_income
+     , cd.con_payment_front_amt / (CASE
+                                       WHEN 12000 < total_income THEN 12000
+                                       ELSE total_income END)                      AS pti
+     , cd.purchase_make                                                           AS make
+     , cd.purchase_year                                                     AS model_year
+     , cd.purchase_vin                                                            AS vin
+     , dru.riskdealergroup                                                         AS lob
+     , date_part(dayofweek, cd.application_received_dtm)
+
+AS day_of_week
+     , COALESCE(ccat.secured_credit_card,pcat.secured_credit_card, 0)                                       AS secured_credit_card
+
+     ,COALESCE(stu.sandbox_chime, ccat.chime_indicator, pcat.prov_chime, 0)                                       AS chime_indicator
+     ,COALESCE(stu.sandbox_chime, ccat.chime_indicator, cbcat.chime_indicator, pcat.prov_chime, 0)                    AS nonkmx_chime_indicator
+
+     ,stu.student_loan_flag::int AS student_loan_flag
+
+     ,case when cd.cb_customer_id is not null then 1.0000 else 0.0000 end as cb_flag
+
+     ,case when fraud.fraud_adjustment > 0 then fraud.fraud_adjustment else 1.00 end as fraud_adjustment
+
+     , cd.pb_primary_employer                                                      AS job_company
+
+     , COALESCE(ett.seasonal_flag, 0)                                               AS seasonal_employment_flag
+     , COALESCE(ett.waiter_flag, 0)                                                 AS waiter_employment_flag
+     , cdd.pricing_specialty_dealer_name                                           AS specialty_dealer
+     , cd.pb_primary_years_at_employer * 12 + cd.pb_primary_months_at_employer                                              AS employed_months
+     , COALESCE(cd.pb_fico_score, 0)                                         AS fico_score
+     , COALESCE(cast(ccat.vantage as int), 0)  AS vantage_score
+     , cd.pb_current_state_code                                              AS state
+     , COALESCE(kmx.app_type, lkat.app_type)                                        AS pull_type
+     ,  COALESCE(ccat.dq_auto, pcat.dq_auto, 0)                                     AS existing_dq_count
+     , CASE
+           WHEN COALESCE(ccat.num_tradelines, pcat.num_tradelines) > 0 AND COALESCE(ccat.auth_tradelines, pcat.auth_tradelines) > 0
+               THEN COALESCE(ccat.auth_tradelines, pcat.auth_tradelines)::float / COALESCE(ccat.num_tradelines, pcat.num_tradelines)::float
+           ELSE 0.0 END                                                                                 AS pct_auth_tradelines
+     , COALESCE(ccat.open_tradelines, pcat.open_tradelines)                                                                             AS open_tl
+     , COALESCE(ccat.prev_chargeoff, pcat.prev_chargeoff,0)                                                                 AS prev_co_count
+     , CASE
+           WHEN dru.RiskDealerGroup in ('KMX', 'MCY') THEN dru.RiskDealerGroup
+           WHEN dap."dealer level loss adjustment" = 'F' THEN 'E'
+           ELSE dap."dealer level loss adjustment" END AS lob_or_bucket
+     , case
+           when cd.con_apr < .20 then 'A'
+           when cd.con_apr < .24 then 'B'
+           when cd.con_apr < .28 then 'C'
+           else 'D'
+    end                                                                            as apr_bucket
+
+    , cd.con_apr as apr
+    , case
+        when cd.application_received_date >= '2024-12-16'
+               then 0
+           when cd.application_received_date >= '2024-11-7' and cd.application_received_date < '2024-12-16' and
+                lrn.ghostfile < 250 then 0
+           else 1 end as fico_adjustment_flag
+
+        , case
+        when cd.risk_model_version = 3.1 and dru.riskdealergroup = 'KMX' then 3.1
+        when cd.risk_model_version = 3.2 and dru.riskdealergroup = 'KMX' then 3.2
+        when cd.risk_model_version = 4.1 and dru.riskdealergroup = 'KMX' then 4.1
+        else 3.0
+        end as mtn_model
+
+        , case when kmx.m_random < 100 or kmx.m_random > 500 then 1 else 0 end as kmx_npc_flag
+
+     , d.dealer_type                                                               AS frn_subgroup
+
+FROM edwnpi.los_deal_current_fact AS cd
+
+    LEFT JOIN student_loan stu
+                   ON stu.loan_id = cd.loan_id
+
+         LEFT JOIN edwnpi.dealer_rollup_scd_current AS dru
+                   ON dru.dealer_number = cd.dealer_number
+         LEFT JOIN edwnpi.date_dim AS dd
+                   ON cd.book_date = dd.calendar_date
+         LEFT JOIN edwnpi.date_dim AS dd_app
+                   ON date(cd.application_received_dtm) = dd_app.calendar_date
+
+
+        LEFT join sandbox.rds_blackbook_rollup bbvt
+                   ON cd.account_number = bbvt.account_number
+
+
+        LEFT JOIN sandbox.kmx_approvals kmx
+                     ON kmx.loan_id = cd.loan_id
+
+
+         LEFT JOIN edwnpi.dealer_attributes_pivot AS dap
+                   ON cd.dealer_number = dap.dealerid AND dap.datasourceid = 17
+         LEFT JOIN edwnpi.crm_dealer_dim AS cdd
+                   ON cdd.dealer_number = cd.dealer_number
+                       AND cdd.current_version_flag = 1
+         LEFT JOIN employment_agg AS ett
+                   ON ett.account_number = cd.account_number
+         LEFT JOIN sandbox.kmx_los_new_sp lkat
+                    ON lkat.loan_id = cd.loan_id
+         LEFT JOIN sandbox.temp_prov_customer_credit_attributes_ragu AS pcat
+                   ON pcat.customerid = cd.pb_customer_id
+                   and cd.data_source_id = 17
+         LEFT JOIN sandbox.temp_los_customer_credit_attributes_ragu AS ccat
+                   ON ccat.customer_id = cd.pb_customer_id
+                   and cd.data_source_id = 100
+         LEFT JOIN sandbox.temp_los_customer_credit_attributes_ragu AS cbcat
+                    ON cbcat.customer_id = cd.cb_customer_id
+         LEFT JOIN sandbox.loan_random_numbers lrn
+                    ON lrn.loan_id = cd.loan_id
+
+        LEFT JOIN sandbox.temp_fraud_ragu as fraud
+                    ON fraud.loan_id = cd.loan_id
+
+         LEFT JOIN dealers d
+                   ON d.dealer_number = cd.dealer_number
+
+WHERE
+   cd.data_source_name != 'SPARTAN'
+  AND cd.book_date IS NOT NULL
+  AND cd.book_date >= {min_book_date}
