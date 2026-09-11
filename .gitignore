@@ -1,0 +1,15 @@
+# Pickle / cache files
+*.pkl
+
+# New Folder (legacy/scratch)
+New Folder/
+
+# Excel temp lock files
+~$*.xlsx
+~$*.xls
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# IDE files
+.idea/
