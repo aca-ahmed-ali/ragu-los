@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- **ste_segment_splits.txt**: New SQL query for STE segment separation (Downcredit Used, Downcredit New, Upcredit Used, Upcredit New)
+  - Wraps the full STE ULA base query as a CTE (`ula_base`)
+  - Computes `is_new` flag in SQL replicating the Python logic: model_year within 2 years of app_date, purchase_type/mileage thresholds (used < 500mi, new <= 7500mi)
+  - Classifies each loan into a `segment` column using model_score threshold of 140 (downcredit < 140, upcredit >= 140) crossed with new/used
+  - Standalone query with no temp table dependencies (removed `#temp_employment_type`, `#temp_sfs_customer_credit_attributes`, `#temp_fraud` and all columns sourced from them)
+
 - **ste_date_cutoff_diagnostic.ipynb**: New diagnostic notebook to identify why STE RAGU postintegration data stops at the week of August 9, 2026
   - Cell 1: Redshift connection setup and helper functions
   - Cell 2: Source table freshness check (weekly row counts >= 2026-07-01) for `los_deal_current_fact`, `sfs_booked_contracts_scd`, `sfs_deal_detail_scd`, `rds_rec_model_originations`, and `date_dim`

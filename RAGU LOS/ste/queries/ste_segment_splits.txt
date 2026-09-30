@@ -1,0 +1,167 @@
+-- STE segment splits: Downcredit Used, Downcredit New, Upcredit Used, Upcredit New
+-- is_new replicates the Python logic from ste_ragu_vanillas.ipynb
+-- model_score threshold = 140
+
+WITH ula_base AS (
+    SELECT cd.account_number
+         , cd.book_date
+         , dd.calendar_week                                                    AS book_week
+         , prev.decision_date                                                  AS app_date
+         , COALESCE(bb_eval.blackbook, bbvt.bb_value)                          AS bbvalue
+         , cd.con_sales_price                                                  AS sale_price
+         , -1                                                                  AS frni_flag
+         , con.contract_rate                                                   AS apr
+         , con.book_amount                                                     AS amt_financed
+         , cd.con_cash_down_amt                                                AS cash_down
+         , cd.con_net_trade_amt                                                AS tradein_value
+         , cd.purchase_odometer                                                AS mileage
+         , con.purchase_type                                                   AS purchase_type
+         , CASE
+               WHEN app.model_score_version IN (4.0, 4.1)
+                    AND app.application_received_date < '2026-05-20'
+                   THEN ((0.8177 * model_scores.model_score) + 24.5)::int
+               ELSE COALESCE(model_scores.model_score, dec.roa_model_score)
+           END                                                                 AS model_score
+         , model_scores.model_score                                            AS cd_model_score
+         , CASE WHEN model_scores.con_total_income_amt < 2 * dec.total_income_amt
+                THEN model_scores.con_total_income_amt END                     AS total_income
+         , con.book_pti                                                        AS pti
+         , cd.purchase_make                                                    AS make
+         , cd.purchase_year                                                    AS model_year
+         , cd.purchase_vin                                                     AS vin
+         , 'STG'                                                               AS lob
+         , date_part(dayofweek, cd.application_received_dtm)                   AS day_of_week
+         , CASE WHEN cd.cb_customer_id IS NOT NULL THEN 1.0 ELSE 0.0 END      AS cb_flag
+         , cdd.pricing_specialty_dealer_name                                   AS specialty_dealer
+         , COALESCE(cd.pb_fico_score, 0)                                       AS fico_score
+         , cd.pb_current_state_code                                            AS state
+         , lkat.app_type                                                       AS pull_type
+         , CASE
+               WHEN dru.RiskDealerGroup IN ('KMX', 'MCY') THEN dru.RiskDealerGroup
+               WHEN dap."dealer level loss adjustment" = 'F' THEN 'E'
+               ELSE dap."dealer level loss adjustment" END                     AS lob_or_bucket
+         , CASE
+               WHEN cd.con_apr < .20 THEN 'A'
+               WHEN cd.con_apr < .24 THEN 'B'
+               WHEN cd.con_apr < .28 THEN 'C'
+               ELSE 'D'
+           END                                                                 AS apr_bucket
+         , CASE
+               WHEN cd.application_received_date >= '2024-12-16' THEN 0
+               WHEN cd.application_received_date >= '2024-11-7'
+                    AND cd.application_received_date < '2024-12-16'
+                    AND lrn.ghostfile < 250 THEN 0
+               ELSE 1 END                                                      AS fico_adjustment_flag
+         , cd.pb_primary_employer                                              AS job_company
+         , CASE
+               WHEN risk_model_version = 3.1 AND dru.riskdealergroup = 'KMX'
+                   THEN 'MTN3.1' ELSE '' END                                   AS mtn_model
+         , con.book_pti                                                        AS con_pti_back
+         , app.model_score_version                                             AS model_score_version
+
+    FROM edwnpi.los_deal_current_fact AS cd
+             INNER JOIN ods.sfs_booked_contracts_scd con
+                        ON con.sfs_application_number = cd.sfs_application_number
+                            AND con.current_version_flag = 1
+             LEFT JOIN edwnpi.dealer_rollup_scd_current AS dru
+                       ON dru.dealer_number = cd.dealer_number
+             LEFT JOIN edwnpi.date_dim AS dd
+                       ON cd.book_date = dd.calendar_date
+             LEFT JOIN sandbox.rds_blackbook_rollup bbvt
+                       ON con.sfs_application_number = bbvt.sfs_application_number
+                           AND bb_value_source = 'sandbox.sfs_vehicles'
+                           AND bb_value_type = 'history_adjusted_wholesale_avg'
+             LEFT JOIN edwnpi.dealer_attributes_pivot AS dap
+                       ON cd.dealer_number = dap.dealerid AND dap.datasourceid = 17
+             LEFT JOIN (SELECT loan_id,
+                               application_received_date,
+                               deal_detail_id,
+                               source_document_id,
+                               model_score_version,
+                               ROW_NUMBER()
+                               OVER (PARTITION BY source_document_id
+                                     ORDER BY application_received_date DESC) rn
+                        FROM odsnpi.sfs_deal_detail_scd
+                        WHERE current_version_flag = 1
+                          AND aspect = 'application') app
+                       ON cd.sfs_application_number = app.source_document_id AND app.rn = 1
+             LEFT JOIN odsnpi.sfs_deal_collateral_scd car
+                       ON app.deal_detail_id = car.deal_detail_id
+                           AND car.current_version_flag = 1
+                           AND car.collateral_role = 'Purchase'
+             LEFT JOIN (SELECT collateral_id, evaluation_amt AS blackbook
+                        FROM odsnpi.sfs_collateral_evaluation_scd
+                        WHERE source = 'Blackbook'
+                          AND LOWER(name) IN ('historyadjustedwholesale', 'hadjwholesale')
+                          AND current_version_flag = 1) bb_eval
+                       ON car.collateral_id = bb_eval.collateral_id
+             LEFT JOIN odsnpi.sfs_deal_customer_scd pb_id
+                       ON app.deal_detail_id = pb_id.deal_detail_id
+                           AND pb_id.customer_role = 'Primary'
+                           AND pb_id.current_version_flag = 1
+             LEFT JOIN odsnpi.sfs_deal_customer_scd cb_id
+                       ON app.deal_detail_id = cb_id.deal_detail_id
+                           AND cb_id.customer_role = 'Auxiliary'
+                           AND cb_id.current_version_flag = 1
+             LEFT JOIN (SELECT *, ROW_NUMBER()
+                               OVER (PARTITION BY deal_detail_id
+                                     ORDER BY created_dtm DESC) rn
+                        FROM odsnpi.sfs_deal_scenario_scd
+                        WHERE scenario_type = 'Application') dec
+                       ON app.deal_detail_id = dec.deal_detail_id AND dec.rn = 1
+             LEFT JOIN edwnpi.crm_dealer_dim AS cdd
+                       ON cdd.dealer_number = cd.dealer_number
+                           AND cdd.current_version_flag = 1
+             LEFT JOIN sandbox.kmx_los_new_sp lkat
+                       ON lkat.loan_id = cd.loan_id
+             LEFT JOIN sandbox.loan_random_numbers lrn
+                       ON lrn.loan_id = cd.loan_id
+             LEFT JOIN (SELECT source_document_id,
+                               MIN(application_received_date)::date AS decision_date
+                        FROM odsnpi.sfs_deal_detail_scd
+                        WHERE current_version_flag = 1
+                        GROUP BY source_document_id) prev
+                       ON prev.source_document_id = cd.sfs_application_number
+             LEFT JOIN (SELECT det.loan_id
+                             , det.source_document_id
+                             , scen.model_score
+                             , scen.total_income_amt AS con_total_income_amt
+                             , det.created_dtm
+                             , ROW_NUMBER()
+                               OVER (PARTITION BY det.source_document_id
+                                     ORDER BY det.created_dtm DESC) AS rn
+                        FROM sfs_deal_detail_scd det
+                                 LEFT JOIN sfs_deal_scenario_scd scen
+                                           ON scen.deal_detail_id = det.deal_detail_id
+                        WHERE det.current_version_flag = 1
+                          AND det.aspect = 'contract'
+                          AND scen.scenario_type = 'Contract'
+                          AND scen.current_version_flag = 1) AS model_scores
+                       ON model_scores.source_document_id = cd.sfs_application_number
+                           AND model_scores.rn = 1
+    WHERE cd.data_source_name != 'SPARTAN'
+      AND cd.book_date IS NOT NULL
+      AND con.application_date >= '2025-10-07'
+)
+
+SELECT *
+     , CASE
+           WHEN model_year IS NOT NULL
+                AND date_part('year', app_date::date) - model_year <= 2
+                AND (
+                    (LOWER(TRIM(purchase_type)) = 'used'
+                         AND mileage IS NOT NULL AND mileage < 500)
+                    OR
+                    (LOWER(TRIM(purchase_type)) = 'new'
+                         AND (mileage IS NULL OR mileage <= 7500))
+                )
+           THEN 1 ELSE 0
+       END                                                                     AS is_new
+     , CASE
+           WHEN is_new = 0 AND model_score < 140 THEN 'Downcredit Used'
+           WHEN is_new = 1 AND model_score < 140 THEN 'Downcredit New'
+           WHEN is_new = 0 AND model_score >= 140 THEN 'Upcredit Used'
+           WHEN is_new = 1 AND model_score >= 140 THEN 'Upcredit New'
+       END                                                                     AS segment
+FROM ula_base
+;
