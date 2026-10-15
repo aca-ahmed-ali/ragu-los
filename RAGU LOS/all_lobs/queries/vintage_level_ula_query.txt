@@ -62,9 +62,7 @@ SELECT
      , cd.purchase_year                                                     AS model_year
      , cd.purchase_vin                                                            AS vin
      , dru.riskdealergroup                                                         AS lob
-     , date_part(dayofweek, cd.application_received_dtm)
-
-AS day_of_week
+     , date_part(dayofweek, cd.application_received_dtm) AS day_of_week
      , COALESCE(ccat.secured_credit_card,pcat.secured_credit_card, 0)                                       AS secured_credit_card
 
      ,COALESCE(stu.sandbox_chime, ccat.chime_indicator, pcat.prov_chime, 0)                                       AS chime_indicator
@@ -73,6 +71,9 @@ AS day_of_week
      ,stu.student_loan_flag::int AS student_loan_flag
 
      ,case when cd.cb_customer_id is not null then 1.0000 else 0.0000 end as cb_flag
+
+    , cd.pb_current_zip_code as     pb_zip
+    , cd.cb_current_zip_code as     cb_zip
 
 
 
@@ -122,6 +123,7 @@ AS day_of_week
         when cd.risk_model_version = 3.1 and dru.riskdealergroup = 'KMX' then 3.1
         when cd.risk_model_version = 3.2 and dru.riskdealergroup = 'KMX' then 3.2
         when cd.risk_model_version = 4.1 and dru.riskdealergroup = 'KMX' then 4.1
+        when cd.risk_model_version = 4.2 and dru.riskdealergroup = 'KMX' then 4.2
         else 3.0
         end as mtn_model
 
@@ -195,6 +197,7 @@ WHERE
    cd.data_source_name != 'SPARTAN'
   AND cd.book_date IS NOT NULL
   AND cd.book_date >= {min_book_date}
+  AND student_loan_flag = 1
 
 --   and (nonkmx_chime_indicator < 1 or cd.book_date <= '2022-05-01')
 

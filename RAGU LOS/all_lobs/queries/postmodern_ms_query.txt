@@ -25,7 +25,7 @@ LEFT JOIN edwnpi.date_dim AS dd
     ON cd.book_date = dd.calendar_date
 LEFT JOIN edwnpi.date_dim AS dd_app
     ON cd.application_received_date = dd_app.calendar_date
-WHERE dru.riskdealergroup IN ('FRN', 'AN', 'STG', 'FLD', 'ENT', 'KMX')
+WHERE dru.riskdealergroup IN ('FRA', 'IND', 'AN', 'STG', 'FLD', 'ENT', 'KMX')
   AND cd.data_source_name != 'SPARTAN'
   AND amt_financed <= 100000    --UNCOMMENT FOR ORIGINAL V
   AND model_score > 0

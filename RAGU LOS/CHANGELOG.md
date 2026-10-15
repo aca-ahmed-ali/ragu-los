@@ -7,6 +7,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- **readFromS3.ipynb**: Added MTN 4.2 model analysis alongside existing FRN 4.1 analysis
+  - Added `MTN_SCORES_PATH` pointing to `S:\rds\rds_adhoc_model_scores\MTN4.2\archive_data_2016_02_to_2025_06_scores.parquet`
+  - New cell to load MTN parquet into `df_mtn` with shape/columns/dtypes/head output
+  - Updated coverage analysis cell to show FRN 4.1, MTN 4.2, and combined (FRN union MTN) coverage of Performance rows at row-level, unique-dmsid, and account-level
+  - Extended date-range and CB-exclusion filter cell to produce `df_mtn_f`
+  - New merge cell producing `df_merged_mtn` and `default_by_score_mtn` aggregation
+  - All 5 graphs refactored to side-by-side subplots (FRN 4.1 left, MTN 4.2 right):
+    - Graph 1: Score Distribution (Loan Count by Score Bucket, 100-160)
+    - Graph 2: Default Rate by Model Score (single MOB with polynomial fit)
+    - Graph 3: Default Rate by Model Score - Multi-MOB Comparison
+    - Graph 4: Marginal Impact (Change in Default Rate per +1 Score Point)
+    - Graph 5: Marginal Impact Multi-MOB Comparison
+  - All markdown headers and in-plot titles/legends explicitly name FRN 4.1 vs MTN 4.2 for clarity
+  - MTN schema differences handled: joins on `dms_account_num` (not `dmsid`), uses `mtn4_2_score` (not `model_score`), uses `con_date` (not `contract_date`), uses `cb_flag` for coborrower exclusion (not `loanpersonrole`)
+  - Multi-MOB helper functions (`_plot_multi_mob_default_rate`, `_plot_multi_mob_marginal`) parameterized with `join_key` and `score_col` to support both FRN and MTN schemas
+
+### Changed
+- **bareboned_ragu_new.ipynb**: FRN LOB split into FRA (Franchise) and IND (Independent) constituents
+  - `LOBS`: Replaced `'FRN'` with `'FRA', 'IND'`
+  - `ROLLUP_GROUPS`: Replaced `'FRN'` with `'FRA', 'IND'` in Franchise Independent, nonKMX, and POS groups
+  - `BASELINES`: Replaced single `'FRN'` entry with identical `'FRA'` and `'IND'` entries (same baseline values)
+  - `lob_or_bucket` backfill: Simplified from `np.select` with FRN/Core special-case to universal `fillna('C')` for all LOBs
+  - `frni_flag` pricing scalar: Removed the +5%/-5% adjustment lines entirely; DLA pricing scalars are now the single source of truth for dealer-level adjustments
+  - `low_pti_flag`: Updated LOB set from `{'AN', 'FLD', 'FRN', 'STG'}` to `{'AN', 'FLD', 'FRA', 'IND', 'STG'}`
+  - Added `'FRN': ['FRA', 'IND']` rollup group to aggregate FRA and IND back into a combined FRN view
+  - Custom export order places FRN immediately after FRA and IND in Excel output
+- **postmodern_ms_query.txt**: Updated `riskdealergroup` WHERE clause from `'FRN'` to `'FRA', 'IND'`
+
+### Added
+- **net_loss_incremental_r2_study.ipynb**: New notebook for unified incremental R-squared contribution analysis across gross loss, recovery, and net loss
+  - Panel 1 (Gross Loss): Stepwise OLS on `gross_loss_pct` with model_score, loss_multiplier, APR (all loans)
+  - Panel 2 (Recovery): Stepwise OLS on `recovery_pct` with recovery multiplier (R) and LTV (chargeoffs, LTV in [100%, 200%))
+  - Panel 3 (Net Loss): Stepwise OLS on `cnl_pct` with all five components: model_score, loss_multiplier, APR, recovery multiplier, LTV (all loans)
+  - Three-panel bar chart visualization with incremental R-squared values annotated per component
+  - Data pipeline reuses SQL queries and derivation logic from `gross_loss_validation_study.ipynb` and `ltv_recovery_coupling_study.ipynb`
+
+### Changed
+- **STE_gl_diagnostics.ipynb relocated**: Moved from `RAGU LOS/misc/` to `RAGU LOS/ste/notebooks/` to share canonical queries and cache with `ste_ragu_postintegration.ipynb`
+  - Rewired query paths from bare filenames to `../queries/` prefix (temptables, ULA, recovery, weekly)
+  - Rewired cache paths from `cache/` to `../../cache/` (shared pickle directory)
+  - Rewired Excel output to `../output/STE_gl_diagnostics.xlsx`
+  - Deleted 5 stale query copies from `RAGU LOS/misc/` (`ste_ragu_ula.txt`, `ste_ragu_recovery.txt`, `ste_ragu_weekly.txt`, `ste_ragu_temptables.txt`, `ste_ragu_dla.txt`)
+
+### Added
+- **cb_same_zip adjustment**: Added coborrower same-zip adjustment (`1.02 - 0.15 * cb_same_zip`) to `STE_gl_diagnostics.ipynb`
+  - Added `cb_same_zip` flag creation in the feature-engineering cell
+  - Added adjustment block to `get_ula_multiplier_nonkmx`
+  - Added adjustment with step tracking (`17_cb_same_zip`) and verbose print to `get_ula_multiplier_nonkmx_diag`; renumbered subsequent steps (pricing_scalar -> 18, final -> 19)
+  - Added `cb_same_zip` mean to the diagnostic summary `flags` dict
+
+### Fixed
+- **ste_ragu_postintegration.ipynb**: Fixed `cb_same_zip` adjustment condition from `==` to `!=` so the adjustment is applied during normal runs (was previously inverted, only applying when leaving that adjustment out)
 - **ste_segment_splits.txt**: New SQL query for STE segment separation (Downcredit Used, Downcredit New, Upcredit Used, Upcredit New)
   - Wraps the full STE ULA base query as a CTE (`ula_base`)
   - Computes `is_new` flag in SQL replicating the Python logic: model_year within 2 years of app_date, purchase_type/mileage thresholds (used < 500mi, new <= 7500mi)

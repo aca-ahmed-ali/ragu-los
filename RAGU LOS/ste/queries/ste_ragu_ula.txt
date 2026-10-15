@@ -52,6 +52,9 @@ SELECT cd.account_number
 
      , case when cd.cb_customer_id is not null then 1.0000 else 0.0000 end as cb_flag
 
+     , cd.pb_current_zip_code as pb_zip
+     , cd.cb_current_zip_code as cb_zip
+
 
      , case
            when fraud.fraud_adjustment > 0 then fraud.fraud_adjustment
